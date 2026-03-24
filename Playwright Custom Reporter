@@ -1,0 +1,627 @@
+// Custom  Report 
+
+`use strict`;
+const fs = require("fs");
+const path = require("path");
+const getEnv = require("./envReader").getEnv;
+const logger = require("./logger");
+const { error } = require("console");
+
+// Read the JSON file
+const jsonFilePath = path.join(__dirname, "../test-results/results.json");
+const jsonData = JSON.parse(fs.readFileSync(jsonFilePath, "utf8"));
+const executionTimeCST = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Chicago",
+  month: "2-digit",
+  day: "2-digit",
+  year: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: true,
+}).format(new Date());
+
+const executionTime = executionTimeCST.replace(",", "") + " CST";
+
+const environment = getEnv("ENVIRONMENT", {
+  default: "",
+}).toUpperCase(); // Default to 'oscar' if TEST_ENV is not set
+const environmentText = environment.toUpperCase();
+let browserTestOrApiTest = getEnv("BROWSER_NAME", {
+  default: "",
+}).toUpperCase();
+// browserTestOrApiTest = browserTestOrApiTest
+//   ? `(${browserTestOrApiTest})`
+//  : "";//`touchPoint`;
+
+//const tagOrSuiteName = getEnv("TAG_OR_SUITE_NAME").toUpperCase();
+let tagOrSuiteName = getEnv("TAG_OR_SUITE_NAME").toUpperCase();
+console.log("Debug: Initial tagOrSuiteName =", tagOrSuiteName);
+let isTouchpointTest = 
+tagOrSuiteName.toLowerCase().includes("paancasesubmission") || 
+  tagOrSuiteName.toLowerCase().includes("onlyocmcases") || 
+  tagOrSuiteName.toLowerCase().includes("casesocm") || 
+  tagOrSuiteName.toLowerCase().includes("casesearchtests") || 
+  tagOrSuiteName.toLowerCase().includes("referencenumber");
+tagOrSuiteName = tagOrSuiteName.match(/(Sanity|Regression)/i)?.[0] || "SANITY";
+
+const uiOrApiTest = getEnv("UI_OR_API_TEST").toUpperCase();
+console.log("To be printed: uiOrApiTest =", uiOrApiTest);
+const statusOrAdditionalInfo = uiOrApiTest.includes("API")
+  ? "Status Code"
+  : "Remarks";
+
+function getSummaryStats(reportData) {
+  const getStatus = d => d.status || d.Status || "";
+  const total = reportData.length;
+  const pass = reportData.filter((d) => getStatus(d) === "PASS").length;
+  const fail = reportData.filter((d) => getStatus(d) === "FAIL").length;
+  const skipped = reportData.filter((d) => getStatus(d) === "SKIPPED").length;
+  return { total, pass, fail, skipped };
+}
+
+function captureRegularParameters() {
+  const reportData = [];
+  jsonData.suites.forEach((suite) => {
+    suite.suites.forEach((subSuite) => {
+      subSuite.specs.forEach((spec) => {
+        spec.tests.forEach((test) => {
+          const lastResult = test.results[test.results.length - 1];
+          let findStatusCodeString = "status code : ";
+          let extractedStausCodeSubString = lastResult.stdout.find((line) =>
+            line.text?.includes(findStatusCodeString)
+          );
+          let apiStatusCodeOrAdditionalInfo = "";
+          if (extractedStausCodeSubString) {
+              apiStatusCodeOrAdditionalInfo =
+              extractedStausCodeSubString &&
+              typeof extractedStausCodeSubString.text === "string"
+                ? extractedStausCodeSubString.text.match(
+                    /status code\s*:\s*(\d{3})/
+                  )?.[1]
+                : "Unavailable";
+          } else {
+            const caseSubmissionPattern =
+              /(\w+)\s+Case\s+is\s+Submitted\s+Successfully\s+with\s+Reference\s+Number:\s+([A-Z]\d+)/;
+            extractedStausCodeSubString = lastResult.stdout.find((line) =>
+              line.text?.match(caseSubmissionPattern)
+            );
+
+            if (extractedStausCodeSubString) {
+              const match = extractedStausCodeSubString.text.match(
+                caseSubmissionPattern
+              );
+              apiStatusCodeOrAdditionalInfo = match ? `${match[2]}` : "";
+            } 
+          }
+
+          reportData.push({
+            apiName: spec.title,
+            status:
+            lastResult.status === "passed"
+                ? "PASS"
+                : lastResult.duration < 1
+                ? "SKIPPED"
+                : "FAIL",
+            duration: (lastResult.duration / 1000).toFixed(2), // Convert to seconds and format to 2 decimal places
+            statusCode: apiStatusCodeOrAdditionalInfo,
+            AdditionalInfo: errorSummary = lastResult.errors?.length > 0 ? 
+            lastResult.errors[0].message
+              .replace(/^Error:\s*/i, '')  // Remove "Error:" prefix
+              .replace(/\n/g, ' ')         // Replace newlines with spaces
+              .trim()                      // Remove leading/trailing spaces
+              .slice(0, 100)               // Limit to 120 characters
+            : "",
+          });
+        });
+      });
+    });
+  });
+  // Unique by apiName and status (keep only the last executed result)
+  const unique = {};
+  reportData.forEach(item => {
+    const key = `${item.apiName}`;
+    unique[key] = item; // always overwrite, so last one stays
+  });
+  return Object.values(unique);
+}
+
+
+
+function captureTouchpointParametersWithTags() {
+  const caseSubmissionData = []; // For @OnlyOCMCases
+  const caseSearchData = [];     // For @SearchCase
+
+  jsonData.suites.forEach((suite) => {
+    suite.suites?.forEach((testSuite) => {
+      testSuite.specs?.forEach((spec) => {
+        spec.tests?.forEach((test) => {
+          // Always use the last result (final attempt)
+          const lastResult = test.results[test.results.length - 1];
+          
+          // ✅ Extract tags from test title or annotations
+          const testTags = extractTagsFromTest(test, spec);
+          
+          const errors = lastResult.errors;
+          let errorSummary = "";
+          if (errors && errors.length > 1 && errors[1].message) {
+            const assertionTextMatch = errors[1].message.match(/(Expected:.*\nReceived:.*\n?)/s);
+            let assertionText = assertionTextMatch ? assertionTextMatch[0] : "";
+            assertionText = assertionText.replace(/\u001b\[[0-9;]*m/g, "");
+            assertionText = assertionText.replace(/"/g, "");
+
+            const match = errors[1].message.match(/^Error: ([^:]*:)/);
+            errorSummary = match ? match[1].replace(/:$/, "") + '\n' + assertionText : errors[1].message + assertionText;
+          } else if (errors && errors.length > 0 && errors[0].message) {
+            const assertionTextMatch = errors[0].message.match(/(Expected:.*\nReceived:.*\n?)/s);
+            let assertionText = assertionTextMatch ? assertionTextMatch[0] : "";
+            assertionText = assertionText.replace(/\u001b\[[0-9;]*m/g, "");
+            assertionText = assertionText.replace(/"/g, "");
+
+            const match = errors[0].message.match(/^Error: ([^:]*:)/);
+            errorSummary = match ? match[1].replace(/:$/, "") + '\n' + assertionText : errors[0].message + assertionText;
+          }
+
+          if (errorSummary.includes("Test timeout of") && errorSummary.includes("beforeEach")) {
+            errorSummary = "Custom Error: Test setup took too long, please check your code.";
+          }
+
+          let cleanSummary = errorSummary.replace(/[^\w\s.,:;!?'"()\-]/g, "");
+          cleanSummary = cleanSummary.slice(0, 100);
+
+          const testData = {
+            Testname: spec.title,
+            Status: lastResult.status === "passed" ? "PASS" : lastResult.duration < 1 ? "SKIPPED" : "FAIL",
+            TouchPoint1: [],
+            TouchPoint2: [],
+            TouchPoint3: [],
+            TouchPoint4: [],
+            TouchPoint5: [],
+            TouchPoint6: [],
+            TouchPoint7: [],
+            CaseNo: [],
+            Error: lastResult.errors?.length > 0 ? cleanSummary : "",
+            Tags: testTags // Store tags for debugging
+          };
+
+          // ✅ Process stdout data for both test types
+          if (lastResult.stdout && Array.isArray(lastResult.stdout)) {
+            lastResult.stdout.forEach((logEntry) => {
+              const text = logEntry.text;
+
+              // ✅ Case Submission specific extractions (@OnlyOCMCases)
+              if (testTags.includes('OnlyOCMCases') || testTags.includes('PaanCaseSubmission') || testTags.includes('CasesOCM')) {
+                // Touch Point 1 (Member)
+                if (text.includes("GetMemberSearch HSCID")) {
+                  pushLabeledValue(testData.TouchPoint1, text, "HSCID");
+                }
+                if (text.includes("Member Search Response Time:")) {
+                  pushLabeledValue(testData.TouchPoint1, text, "RespTime");
+                }
+                if (text.includes("GetMemberSearch CaseManagement")) {
+                  pushLabeledValue(testData.TouchPoint1, text, "CM");
+                }
+
+                // Touch Point 2 (Provider)
+                if (text.includes("SaveCaseProviders HSCID")) {
+                  pushLabeledValue(testData.TouchPoint2, text, "HSCID");
+                }
+                if (text.includes("Provider Response Time:")) {
+                  pushLabeledValue(testData.TouchPoint2, text, "RespTime");
+                }
+                if (text.includes("SaveCaseProviders CaseManagement")) {
+                  pushLabeledValue(testData.TouchPoint2, text, "CM");
+                }
+                if (text.includes("SaveCaseProviders hscProviderId")) {
+                  pushLabeledValue(testData.TouchPoint2, text, "HSCPROVIDER");
+                }
+
+                // Touch Point 3 (Services)
+                if (text.includes("ValidateSubmission HSCID")) {
+                  pushLabeledValue(testData.TouchPoint3, text, "HSCID");
+                }
+                if (text.includes("Validate Submission Response Time:")) {
+                  pushLabeledValue(testData.TouchPoint3, text, "RespTime");
+                }
+                if (text.includes("ValidateSubmission CaseManagement")) {
+                  pushLabeledValue(testData.TouchPoint3, text, "CM");
+                }
+                if (text.includes("ValidateSubmission hscProviderId")) {
+                  pushLabeledValue(testData.TouchPoint3, text, "HSCPROVIDER");
+                }
+
+                // Touch Point 4 (Create Case)
+                if (text.includes("CreateCase HSCID")) {
+                  pushLabeledValue(testData.TouchPoint4, text, "HSCID");
+                }
+                if (text.includes("Create Case Response Time:")) {
+                  pushLabeledValue(testData.TouchPoint4, text, "RespTime");
+                }
+                if (text.includes("CreateCase CaseManagement")) {
+                  pushLabeledValue(testData.TouchPoint4, text, "CM");
+                }
+                if (text.includes("CreateCase hscProviderId")) {
+                  pushLabeledValue(testData.TouchPoint4, text, "HSCPROVIDER");
+                }
+
+                // Case Reference Number
+                if (text.includes("Case Reference Number:")) {
+                  pushLabeledValue(testData.CaseNo, text, "CASE#");
+                }
+              }
+
+              // ✅ Case Search specific extractions (@SearchCase)
+              if (testTags.includes('SearchCase') || testTags.includes('CaseSearchTests') || testTags.includes('referenceNumber')) {
+                // HSC ID extraction
+                if (text.includes("Search HSCID") || text.includes("GetCaseSearch HSCID") || text.includes("GetCaseDetails hscID")) {
+                  pushLabeledValue(testData.TouchPoint5, text, "HSCID");
+                }
+                
+                // Case Management extraction
+                if (text.includes("Search CaseManagement") || text.includes("GetCaseSearch CaseManagement") || text.includes("GetCaseDetails CaseManagement")) {
+                  pushLabeledValue(testData.TouchPoint6, text, "CM");
+                }
+                
+                // Coverage Status extraction
+                if (text.includes("Coverage Status") || text.includes("Overall Coverage") || text.includes("GetCaseDetails OverallCoverage")) {
+                  pushLabeledValue(testData.TouchPoint7, text, "OC");
+                }
+                
+                // Response Time for Case Search
+                if (text.includes("Case Search Response Time:")) {
+                  pushLabeledValue(testData.CaseNo, text, "RespTime");
+                }
+                
+                // Case Search Results
+                if (text.includes("Case Search Results") || text.includes("Found Cases")) {
+                  pushLabeledValue(testData.CaseNo, text, "Results");
+                }
+              }
+            });
+          }
+
+          // Join arrays with <br>
+          testData.TouchPoint1 = testData.TouchPoint1.join("<br>");
+          testData.TouchPoint2 = testData.TouchPoint2.join("<br>");
+          testData.TouchPoint3 = testData.TouchPoint3.join("<br>");
+          testData.TouchPoint4 = testData.TouchPoint4.join("<br>");
+          testData.TouchPoint5 = testData.TouchPoint5.join("<br>");
+          testData.TouchPoint6 = testData.TouchPoint6.join("<br>");
+          testData.TouchPoint7 = testData.TouchPoint7.join("<br>");
+          testData.CaseNo = testData.CaseNo.join("<br>");
+
+          // ✅ Route to appropriate array based on tags
+          if (testTags.includes('OnlyOCMCases') || testTags.includes('PaanCaseSubmission') || testTags.includes('CasesOCM')) {
+            caseSubmissionData.push(testData);
+          } else if (
+            testTags.some(tag =>
+              ['searchcase', 'casesearch', 'referenceNumber', 'casesearchtests'].includes(tag.toLowerCase())
+            )
+          ) {
+            caseSearchData.push(testData);
+          } else {
+            // Default to case submission if no specific tag found
+            caseSubmissionData.push(testData);
+          }
+        });
+      });
+    });
+  });
+
+  // Remove duplicates
+  const uniqueCaseSubmission = removeDuplicates(caseSubmissionData);
+  const uniqueCaseSearch = removeDuplicates(caseSearchData);
+
+  return {
+    caseSubmission: uniqueCaseSubmission,
+    caseSearch: uniqueCaseSearch
+  };
+}
+
+// ✅ NEW: Extract tags from test annotations or title
+function extractTagsFromTest(test, spec) {
+  const tags = [];
+  
+  console.log("Debug: Extracting tags for test", spec.tags, "in spec", spec.title);
+  
+  // Method 2: Check spec-level tags
+    if (spec && spec.tags) {
+      const specTags = Array.isArray(spec.tags) ? spec.tags : [spec.tags];
+      specTags.forEach(tag => {
+        const cleanTag = String(tag).replace('@', '');
+        if (!tags.includes(cleanTag)) {
+          tags.push(cleanTag);
+        }
+      });
+    }
+  
+  
+  console.log("Debug: Extracted tags for test", spec.title, "=>", tags);
+  return tags;
+}
+
+// ✅ NEW: Remove duplicates helper
+function removeDuplicates(reportData) {
+  const unique = {};
+  reportData.forEach(item => {
+    const key = `${item.Testname}`;
+    unique[key] = item;
+  });
+  return Object.values(unique);
+}
+
+function pushLabeledValue(targetArray, text, label) {
+  const colonIndex = text.lastIndexOf(":");
+  let value = colonIndex !== -1 ? text.substring(colonIndex + 1).trim() : "";
+  if (!value || value === `null` || value === `NULL`) value = "NULL";
+  targetArray.push(`${label}:${value}`);
+}
+
+function getReportHeader(reportData) {
+  const { total, pass, fail, skipped } = getSummaryStats(reportData);
+  return `
+   <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>PAANDA | ${getEnv("WEB_API")} | ${environmentText} | ${getEnv(
+    "TEST_SUITE"
+  )} TEST STATUS REPORT - ${executionTime}</title>
+  </head>
+  <body style="font-family: 'Segoe UI', Tahoma, sans-serif; background-color: #f4f7f6; margin: 0; padding: 0;">
+
+    <div style="max-width: 900px; margin: 20px auto; background: #ffffff; box-shadow: 0 4px 8px rgba(0,0,0,0.1); border-radius: 8px; overflow: hidden;">
+
+      <!-- Compact white header with black text -->
+      <div style="background-color: #ffffff; color: #333333; text-align: center; padding: 15px 10px; border-bottom: 2px solid #007bff;">
+        <h1 style="margin: 0; font-size: 1.8em; font-weight: bold;">PAANDA | ${uiOrApiTest} | ${environmentText} | ${tagOrSuiteName} TEST REPORT <span style="font-size: 0.6em;">${browserTestOrApiTest}</span> </h1>
+        <p style="margin: 5px 0 0 0; font-size: 0.95em;">🕒 Execution Time: ${executionTime}</p>
+
+        <!-- Summary Table -->
+        <table role="presentation" cellspacing="0" cellpadding="6" border="0" style="width:100%; text-align:center; margin-top:10px;">
+          <tr>
+            <td style="background-color:#e8f5e9; color:#333; font-weight:bold; font-size:0.95em; border-radius:6px; width:25%;">Total: ${total}</td>
+            <td style="background-color:#e3f2fd; color:#333; font-weight:bold; font-size:0.95em; border-radius:6px; width:25%;">Passed: ${pass}</td>
+            <td style="background-color:#ffebee; color:#333; font-weight:bold; font-size:0.95em; border-radius:6px; width:25%;">Failed: ${fail}</td>
+            <td style="background-color:#f9fbe7; color:#333; font-weight:bold; font-size:0.95em; border-radius:6px; width:25%;">Skipped: ${skipped}</td>
+          </tr>
+        </table>
+      </div>
+      <div style="padding: 10px; overflow-x:auto;">
+  `;
+}
+function getReportFooter() {
+  return `
+      </div>
+      <div style="background:#f1f1f1;text-align:center;padding:10px;font-size:0.85em;color:#555;">
+        
+      </div>
+    </div>
+  </body>
+  </html>
+  `;
+}
+
+function getReportBodyRegularApiOrUi(reportData) {
+  // Default API/UI test table (your original)
+  console.log("Debug: uiOrApiTest =", reportData);
+  const isApiTest = uiOrApiTest.includes("API");
+  const testNameWidth = isApiTest ? "50%" : "50%";
+  const statusWidth = isApiTest ? "16.66%" : "16.67%";
+  const additionalInfoWidth = isApiTest ? "25%" : "25%";
+
+  return `
+      <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed;">
+        <thead>
+          <tr style="background-color: #007bff; color: white;">
+            <th style="padding: 8px; text-align: left; font-size: 0.95em; width: ${testNameWidth};">Test Name</th>
+            <th style="padding: 8px; text-align: center; font-size: 0.95em; width: ${statusWidth};">Status</th>
+            <th style="padding: 8px; text-align: center; font-size: 0.95em; width: ${additionalInfoWidth};">${statusOrAdditionalInfo}</th>
+            ${
+              isApiTest
+                ? `<th style="padding: 8px; text-align: center; font-size: 0.95em; ">Duration (s)</th>`
+                : ""
+            }
+          </tr>
+        </thead>
+        <tbody>
+          ${reportData
+            .map(
+              (data, index) => `
+            <tr style="background-color: ${
+              index % 2 === 0 ? "#f9f9f9" : "#ffffff"
+            };">
+              <td style="padding: 8px; text-align: left; font-size: 0.9em; color: #333;">${
+                data.apiName
+              }</td>
+              <td style="padding: 8px; text-align: center; font-weight: bold; font-size: 0.9em; color:${
+                data.status === "PASS"
+                  ? "green"
+                  : data.status === "FAIL"
+                  ? "red"
+                  : "gray"
+              };">${data.status}</td>
+              ${
+                isApiTest
+                  ? `<td style="padding: 8px; text-align: center; font-size: 0.85em; color: #666;">${data.statusCode}</td>`
+                  : ``
+              }
+              ${
+                isApiTest
+                  ? `<td style="padding: 8px; text-align: center; font-size: 0.9em;">${data.duration}</td>`
+                  : `<td style="padding: 2px; text-align: left; font-size: 0.85em; color: #666; word-wrap: break-word;">${data.AdditionalInfo || ""}</td>`
+              }
+            </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `;
+}
+
+function getReportBodyTouchPointSeparated(caseSubmissionData, caseSearchData) {
+  let htmlContent = '';
+  // print caseSubmissionData and caseSearchData separately
+  console.log("Debug: caseSubmissionData =", caseSubmissionData);
+  console.log("Debug: caseSearchData =", caseSearchData);
+  // ✅ First Table: Case Submission (@OnlyOCMCases)
+  if (caseSubmissionData.length > 0) {
+    htmlContent += `
+    <h4><u>Save Case - Touch Point Level Validations (@OnlyOCMCases):</u></h4>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: auto;">
+      <thead>
+        <tr style="background-color: #007bff; color: white;">
+          <th style="padding:8px;text-align:left; font-size:0.8em; width:22%">Test Name</th>
+          <th style="padding:8px;text-align:center; font-size:0.8em; width:8%">Status</th>
+          <th style="padding:8px;text-align:left; font-size:0.8em; width:14%">
+            Touch Point1<br><span style="display:block; text-align:left;">(Member)</span>
+          </th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:14%">
+            Touch Point2<br><span style="display:block; text-align:left;">(Provider)</span>
+          </th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:14%">
+            Touch Point3<br><span style="display:block; text-align:left;">(ValidateSubmission)</span>
+          </th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:14%">
+            Touch Point4<br><span style="display:block; text-align:left;">(Create Case)</span>
+          </th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:14%">
+            Case#/<br><span style="display:block; text-align:left;"> Remarks</span> 
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        ${caseSubmissionData
+          .map(
+            (data, index) => `
+          <tr style="background-color: ${index % 2 === 0 ? "#f9f9f9" : "#ffffff"};">
+            <td style="padding:8px;text-align:left;font-size:0.8em;">${data.Testname}</td>
+            <td style="padding:8px;text-align:center;font-weight:bold;font-size:0.8em;color:${
+              data.Status === "PASS" ? "green" : data.Status === "FAIL" ? "red" : "gray"
+            };">${data.Status}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint1}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint2}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint3}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint4}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.CaseNo}${data.Error || ""}</td>
+          </tr>`
+          )
+          .join("")}
+      </tbody>
+    </table>
+    <br>`;
+  }
+
+  // Case Search Table (TouchPoint5, TouchPoint6, TouchPoint7)
+  if (caseSearchData.length > 0) {
+    htmlContent += `
+    <h4><u>Case Search - Touch Point Level Validations (@CaseSearchTests):</u></h4>
+    <table style="width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: auto;">
+      <thead>
+        <tr style="background-color: #007bff; color: white;">
+          <th style="padding:8px;text-align:left; font-size:0.8em; width:22%">Test Name</th>
+          <th style="padding:8px;text-align:center; font-size:0.8em; width:8%">Status</th>
+          <th style="padding:8px;text-align:left; font-size:0.8em; width:20%">HSC ID</th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:20%">Case Management</th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:15%">Overall Coverage Status</th>
+          <th style="padding:8px;text-align:left; font-size:0.8em;width:15%">Remarks/Results</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${caseSearchData.map((data, index) => `
+          <tr style="background-color: ${index % 2 === 0 ? "#f9f9f9" : "#ffffff"};">
+            <td style="padding:8px;text-align:left;font-size:0.8em;">${data.Testname}</td>
+            <td style="padding:8px;text-align:center;font-weight:bold;font-size:0.8em;color:${data.Status === "PASS" ? "green" : data.Status === "FAIL" ? "red" : "gray"};">${data.Status}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint5}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint6}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.TouchPoint7}</td>
+            <td style="padding:8px;text-align:left; font-size:0.8em;">${data.CaseNo}${data.Error || ""}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>
+    <br>`;
+  }
+  return htmlContent;
+}
+
+function getHtmlOutput() {
+  const uiOrApiTestLower = uiOrApiTest.toLowerCase();
+  
+  console.log(`Debug: uiOrApiTest = "${uiOrApiTest}", isTouchpointTest = ${isTouchpointTest}`);
+  
+  // ✅ API Test Report
+  if (uiOrApiTestLower.includes("api")) {
+    console.log("Generating API test report...");
+    const apiReportData = captureRegularParameters();
+    
+    logger.info(`Debug: API tests = ${apiReportData.length}`);
+    
+    const htmlHeader = getReportHeader(apiReportData);
+    const tableContent = getReportBodyRegularApiOrUi(apiReportData);
+    const htmlFooter = getReportFooter();
+    
+    return htmlHeader + tableContent + htmlFooter;
+  }
+  
+  // ✅ UI Test Report with Touchpoint separation
+  else if (uiOrApiTestLower.includes("ui") && isTouchpointTest) {
+    console.log("Generating UI touchpoint test report...");
+    const { caseSubmission, caseSearch } = captureTouchpointParametersWithTags();
+    
+    // Combine for summary stats
+    const allReportData = [...caseSubmission, ...caseSearch];
+    
+    logger.info(
+      `Debug: Case Submission tests = ${caseSubmission.length}, Case Search tests = ${caseSearch.length}, Total = ${allReportData.length}`
+    );
+
+    const htmlHeader = getReportHeader(allReportData);
+    const tableContent = getReportBodyTouchPointSeparated(caseSubmission, caseSearch);
+    const htmlFooter = getReportFooter();
+    
+    return htmlHeader + tableContent + htmlFooter;
+  }
+  
+  // ✅ Regular UI Test Report (non-touchpoint)
+  else if (uiOrApiTestLower.includes("ui") && !isTouchpointTest) {
+    console.log("Generating regular UI test report...");
+    const uiReportData = captureRegularParameters();
+    
+    logger.info(`Debug: Regular UI tests = ${uiReportData.length}`);
+    
+    const htmlHeader = getReportHeader(uiReportData);
+    const tableContent = getReportBodyRegularApiOrUi(uiReportData);
+    const htmlFooter = getReportFooter();
+    
+    return htmlHeader + tableContent + htmlFooter;
+  }
+  
+  // ✅ Fallback - Default to touchpoint if unclear
+  else {
+    console.log("Fallback: Generating touchpoint test report...");
+    const { caseSubmission, caseSearch } = captureTouchpointParametersWithTags();
+    const allReportData = [...caseSubmission, ...caseSearch];
+    
+    const htmlHeader = getReportHeader(allReportData);
+    const tableContent = getReportBodyTouchPointSeparated(caseSubmission, caseSearch);
+    const htmlFooter = getReportFooter();
+    
+    return htmlHeader + tableContent + htmlFooter;
+  }
+
+}
+
+function writeHtmlToFile() {
+  const htmlContent = getHtmlOutput();
+  const outputFilePath = path.join(
+    __dirname,
+    "../playwright-report/sanity-test-report.html"
+  );
+  fs.writeFileSync(outputFilePath, htmlContent, "utf8");
+  console.log(
+    `✅ Outlook-friendly, compact HTML report generated: ${outputFilePath}`
+  );
+}
+
+writeHtmlToFile();
+console.log("report:", captureTouchpointParametersWithTags());
+module.exports = { getHtmlOutput };
