@@ -1,0 +1,467 @@
+CICD
+Case search YML
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  CASE SEARCH TESTS - GITHUB ACTIONS WORKFLOW (FIXED)
+# ═══════════════════════════════════════════════════════════════════════════
+# ✅ ALL ISSUES FIXED:
+# 1. Environment variable naming conflicts resolved
+# 2. Input references corrected (inputs. vs github.event.inputs.)
+# 3. Email conditionals fixed (success-only vs always)
+# 4. Step IDs added for proper conditional logic
+# 5. Node version consistency (22)
+# 6. Permissions added
+# 7. Authorization logic improved
+# 8. Failure handling enhanced
+# 9. PR comment functionality added
+# 10. Artifact naming improved
+# ═══════════════════════════════════════════════════════════════════════════
+
+name:  Case Search Tests - Main Branch
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WORKFLOW TRIGGERS
+# ═══════════════════════════════════════════════════════════════════════════
+on:
+  # ─────────────────────────────────────────────────────────────────────────
+  # On Push Trigger
+  # ─────────────────────────────────────────────────────────────────────────
+  #push:
+    #branches: [working_branch_for_CaseSearch]
+  # ─────────────────────────────────────────────────────────────────────────
+  # Pull Request Trigger
+  # ─────────────────────────────────────────────────────────────────────────
+  #pull_request:
+    #branches: [main]
+  
+  schedule:
+  - cron: '30 6,10,14,18,22 * * 1-5' 
+  
+  # ─────────────────────────────────────────────────────────────────────────
+  # Manual Workflow Dispatch
+  # ─────────────────────────────────────────────────────────────────────────
+  workflow_dispatch:
+    inputs:
+      test_tag:
+        description: 'Test Tag to Run'
+        required: true
+        type: choice
+        options:
+          - 'CaseSearchTests'
+          - 'CaseSubmission'
+          - 'ocmWithIP'
+          - 'ocmWithOP'
+          - 'ocmWithOPF'
+        default: 'CaseSearchTests'
+      
+      portal:
+        description: 'Portal Type'
+        required: true
+        type: choice
+        options:
+          - 'PAPA'
+          - 'OSCAR'
+          - 'QUEBEC'
+        default: 'PAPA'
+      
+      environment:
+        description: 'Test Environment'
+        required: true
+        type: choice
+        options:
+          - 'STAGE'
+          - 'PROD'
+        default: 'STAGE'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PERMISSIONS
+# ═══════════════════════════════════════════════════════════════════════════
+permissions:
+  contents: read
+  deployments: write
+  pull-requests: write
+
+# ═══════════════════════════════════════════════════════════════════════════
+# JOBS
+# ═══════════════════════════════════════════════════════════════════════════
+jobs:
+  e2e:
+    name: OCM Tests - ${{ inputs.portal || 'PAPA' }} - ${{ inputs.environment || 'STAGE' }}
+    runs-on: uhg-runner
+    timeout-minutes: 90
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ENVIRONMENT VARIABLES (FIXED)
+    # ═══════════════════════════════════════════════════════════════════════
+    env:
+      # ───────────────────────────────────────────────────────────────────
+      # ✅ FIXED: Changed 'environment' to 'TEST_ENVIRONMENT'
+      # Avoids conflict with GitHub's reserved 'environment' context
+      # ───────────────────────────────────────────────────────────────────
+      TEST_ENVIRONMENT: ${{ inputs.environment || 'STAGE' }}
+      Environment: ${{ inputs.environment || 'STAGE' }}  # Legacy support
+      
+      # ✅ FIXED: Changed from github.event.inputs to inputs
+      PORTAL_TYPE: ${{ inputs.portal || 'PAPA' }}
+      
+      # Stage Environment
+      STAGE_BASE_URL: ${{ secrets.STAGE_BASE_URL }}
+      RELEASE_BASE_URL: ${{ secrets.RELEASE_BASE_URL }}
+      STAGE_USERNAME: ${{ secrets.STAGE_USERNAME }}
+      STAGE_PASSWORD: ${{ secrets.STAGE_PASSWORD }}
+      STAGE_ACCESS_CODE: ${{ secrets.STAGE_ACCESS_CODE }}
+      
+      # Production Environment
+      PROD_BASE_URL: ${{ secrets.PROD_BASE_URL }}
+      PROD_USERNAME: ${{ secrets.PROD_USERNAME }}
+      PROD_PASSWORD: ${{ secrets.PROD_PASSWORD }}
+      
+      # Database Configuration
+      COLLECTION_NAME: ${{ secrets.COLLECTION_NAME }}
+      DATABASE_NAME: ${{ secrets.DATABASE_NAME }}
+      DATA_FILE: ${{ secrets.DATA_FILE }}
+      URI: ${{ secrets.URI }}
+      
+      # Test Configuration
+      TEST_ENV: papa
+      CI: true
+      GITHUB_ACTIONS: true
+      
+      # Authorization
+      ALLOWED_USERS: ${{ secrets.ALLOWED_USERS }}
+      EMAIL_RECIPIENTS_SUCCESS: ${{ secrets.EMAIL_RECIPIENTS_SUCCESS }}
+      SINGLE_USER: ${{ secrets.SINGLE_USER }}
+      SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USERNAME: ${{ secrets.OUTLOOK_EMAIL }}
+      SMTP_PASSWORD: ${{ secrets.OUTLOOK_PASSWORD }}
+      SMTP_FROM: ${{ secrets.OUTLOOK_EMAIL }}
+
+    steps:
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 1: User Authorization Check
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🔒 Check User Authorization
+        id: auth_check
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          ALLOWED_USERS="${{ env.ALLOWED_USERS }}"
+          TRIGGERED_BY="${{ github.actor }}"
+          
+          echo "🔍 Workflow triggered by: $TRIGGERED_BY"
+          echo "✅ Allowed users: $ALLOWED_USERS"
+          
+          if echo "$ALLOWED_USERS" | grep -qw "$TRIGGERED_BY"; then
+            echo "✅ Authorization successful"
+            echo "authorized=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Authorization failed"
+            echo "authorized=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 2: Unauthorized Access Alert
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📧 Send Unauthorized Access Alert
+        if: failure() && steps.auth_check.outputs.authorized == 'false'
+        uses: uhc-tech-provider/action-send-mail@v6
+        with:
+          server_address: ${{ env.SMTP_SERVER }}
+          server_port: ${{ env.SMTP_PORT }}
+          username: ${{ env.SMTP_USERNAME }}
+          password: ${{ env.SMTP_PASSWORD }}
+          secure: false
+          subject: ⚠️ UNAUTHORIZED Workflow Execution Attempt
+          to: ${{ env.ALLOWED_USERS }}
+          from: ${{ env.SMTP_FROM }}
+          html_body: |
+            <html>
+            <body style="font-family: Arial, sans-serif;">
+              <h2 style="color: #d32f2f;">⚠️ Unauthorized Workflow Execution Attempt</h2>
+              <p><strong>User:</strong> ${{ github.actor }}</p>
+              <p><strong>Workflow:</strong>  Case Submission Tests</p>
+              <p><strong>Repository:</strong> ${{ github.repository }}</p>
+              <p><strong>Time:</strong> ${{ github.event.head_commit.timestamp }}</p>
+              <p><strong>Run ID:</strong> ${{ github.run_id }}</p>
+              <hr>
+              <p>This user is not in the authorized users list.</p>
+              <p><strong>Allowed Users:</strong> ${{ env.ALLOWED_USERS }}</p>
+            </body>
+            </html>
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 3: Checkout Repository
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📥 Checkout Code
+        id: checkout
+        uses: actions/checkout@v4
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 4: Setup Node.js
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🔧 Setup Node.js
+        id: node_setup
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 5: Configure NPM Registry
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🔗 Set NPM Registry
+        id: npm_registry
+        run: npm config set registry https://repo1.uhc.com/artifactory/api/npm/npm-virtual
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 6: Disable SSL Verification
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🔓 Disable Strict SSL
+        id: disable_ssl
+        run: npm config set strict-ssl false
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 7: Install Dependencies
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📦 Install Dependencies
+        id: install_deps
+        run: npm install
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 8: Install Playwright Browsers
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🎭 Install Playwright
+        id: install_playwright
+        run: npx playwright install
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 9: Install Chrome with Dependencies
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🌐 Install Chrome Browser
+        id: install_chrome
+        run: npx playwright install --with-deps chrome
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 10: Display Test Configuration
+      # ═══════════════════════════════════════════════════════════════════
+      - name: ℹ️ Log Test Configuration
+        id: log_config
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📋 Test Configuration:"
+          echo "   Portal Type: ${{ env.PORTAL_TYPE }}"
+          echo "   Environment: ${{ env.TEST_ENVIRONMENT }}"
+          echo "   Test Tag: ${{ inputs.test_tag || 'OnlyOCMCases' }}"
+          echo "   CI: ${{ env.CI }}"
+          echo "   GitHub Actions: ${{ env.GITHUB_ACTIONS }}"
+          echo "═══════════════════════════════════════════════════════════════"
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 11: Run Playwright Tests
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🧪 Run Playwright Tests
+        id: run_tests
+        run: npm run test:uiOCMCaseSearchTest
+        env:
+          PORTAL_TYPE: ${{ env.PORTAL_TYPE }}
+          Environment: ${{ env.TEST_ENVIRONMENT }}
+        continue-on-error: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 12: Generate Custom Report
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📊 Generate Custom Report
+        id: generate_report
+        if: always()
+        run: npm run test:generateCustomReport
+        env:
+          PORTAL_TYPE: ${{ env.PORTAL_TYPE }}
+        continue-on-error: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 13: Load HTML Report
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📄 Load HTML Report
+        id: get_html
+        if: always()
+        run: |
+          if [ -f "playwright-report/sanity-test-report.html" ]; then
+            html_body=$(cat playwright-report/sanity-test-report.html)
+            echo "HTML_BODY=${html_body//$'\n'/ }" >> $GITHUB_ENV
+          else
+            echo "HTML_BODY=<p>Test report not generated</p>" >> $GITHUB_ENV
+          fi
+        continue-on-error: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 14: Load Test Config Variables
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🔧 Load Test Config Variables
+        id: load_config
+        if: always()
+        run: |
+          npm run test:readEnv || true
+          echo "ENVIRONMENT=${{ env.TEST_ENVIRONMENT }}" >> $GITHUB_ENV
+          echo "TEST_SUITE=${{ env.TEST_SUITE }}" >> $GITHUB_ENV
+          echo "WEB_API=${{ env.WEB_API }}" >> $GITHUB_ENV  
+          echo "PROJECT=${{ env.PROJECT }}" >> $GITHUB_ENV
+        continue-on-error: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 15: Display Environment Variables
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📋 Display ENV Variables
+        id: display_env
+        if: always()
+        run: |
+          echo "Test Suite: ${{ env.TEST_SUITE }}"
+          echo "Web API: ${{ env.WEB_API }}"
+          echo "Project: ${{ env.PROJECT }}"
+          echo "Environment: ${{ env.TEST_ENVIRONMENT }}"
+        continue-on-error: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 16: Upload Artifacts
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 📤 Upload Artifacts
+        id: upload_artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Test-Results-${{ env.PORTAL_TYPE }}-${{ env.TEST_ENVIRONMENT }}-${{ github.run_number }}
+          path: |
+            playwright-report
+            test-results
+            testLogs.log
+            allure-results
+          retention-days: 14
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 17: Send Success Email (FIXED) ${{ inputs.portal || 'PAPA' }}
+      # ═══════════════════════════════════════════════════════════════════
+      - name: ✅ Send Success Email
+        id: send_success_email
+        uses: uhc-tech-provider/action-send-mail@v6
+        # ✅ FIXED: Only send if ALL steps succeeded AND workflow_dispatch
+        if: |
+          success() &&
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          steps.run_tests.outcome == 'success'
+        with:
+          server_address: ${{ env.SMTP_SERVER }}
+          server_port: ${{ env.SMTP_PORT }}
+          username: ${{ env.SMTP_USERNAME }}
+          password: ${{ env.SMTP_PASSWORD }}
+          secure: false
+          subject:  Automation | Sanity Report | Case Search-UI | RELEASE | Build ${{ github.run_number }}
+          to: ${{ env.EMAIL_RECIPIENTS_SUCCESS }}
+          from: ${{ env.SMTP_FROM }}
+          html_body: ${{ env.HTML_BODY }}
+          attachments: |
+            ${{ github.workspace }}/playwright-report/index.html
+          convert_markdown: true
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 18: Send Failure Email (FIXED)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: ❌ Send Failure Email
+        id: send_failure_email
+        uses: uhc-tech-provider/action-send-mail@v6
+        # ✅ FIXED: Only send if tests failed AND workflow_dispatch AND authorized
+        if: |
+          failure() &&
+          (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule') &&
+          (steps.auth_check.outcome == 'success' || steps.auth_check.outcome == 'skipped') &&
+          steps.run_tests.outcome == 'failure'
+        with:
+          server_address: ${{ env.SMTP_SERVER }}
+          server_port: ${{ env.SMTP_PORT }}
+          username: ${{ env.SMTP_USERNAME }}
+          password: ${{ env.SMTP_PASSWORD }}
+          secure: false
+          subject: ❌ FAILURE | DA OCM Tests | ${{ inputs.portal || 'PAPA' }} | ${{ inputs.environment || 'STAGE' }} | Build ${{ github.run_number }}
+          to: ${{ env.SINGLE_USER }}
+          from: ${{ env.SMTP_FROM }}
+          html_body: |
+            <html>
+            <body style="font-family: Arial, sans-serif;">
+              <h2 style="color: #d32f2f;">❌ Test Execution Failed</h2>
+              
+              <h3>Configuration:</h3>
+              <ul>
+                <li><strong>Portal:</strong> ${{ inputs.portal || 'PAPA' }}</li>
+                <li><strong>Environment:</strong> ${{ inputs.environment || 'STAGE' }}</li>
+                <li><strong>Test Tag:</strong> ${{ inputs.test_tag || 'OnlyOCMCases' }}</li>
+                <li><strong>Triggered by:</strong> ${{ github.actor }}</li>
+                <li><strong>Run ID:</strong> ${{ github.run_id }}</li>
+              </ul>
+              
+              <h3>Step Outcomes:</h3>
+              <ul>
+                <li>Checkout: ${{ steps.checkout.outcome }}</li>
+                <li>Node Setup: ${{ steps.node_setup.outcome }}</li>
+                <li>Install Dependencies: ${{ steps.install_deps.outcome }}</li>
+                <li>Install Playwright: ${{ steps.install_playwright.outcome }}</li>
+                <li>Install Chrome: ${{ steps.install_chrome.outcome }}</li>
+                <li>Run Tests: <strong style="color: #d32f2f;">${{ steps.run_tests.outcome }}</strong></li>
+                <li>Generate Report: ${{ steps.generate_report.outcome }}</li>
+                <li>Upload Artifacts: ${{ steps.upload_artifacts.outcome }}</li>
+              </ul>
+              
+              <hr>
+              <p><a href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View Full Workflow Run</a></p>
+            </body>
+            </html>
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 19: Post PR Comment (FIXED)
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 💬 Post PR Comment
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const testStatus = '${{ steps.run_tests.outcome }}';
+            const statusEmoji = testStatus === 'success' ? '✅' : '❌';
+            const statusText = testStatus === 'success' ? 'PASSED' : 'FAILED';
+            
+            const comment = `## ${statusEmoji} OCM Case Submission Tests ${statusText}
+            
+            **Configuration:**
+            - Portal: \`${{ env.PORTAL_TYPE }}\`
+            - Environment: \`${{ env.TEST_ENVIRONMENT }}\`
+            - Build: #${{ github.run_number }}
+            
+            **Results:**
+            - Test Execution: ${statusEmoji} ${statusText}
+            - Artifacts: [Download Here](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts)
+            
+            ---
+            
+            📊 [View Full Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ${testStatus === 'failure' ? '⚠️ **Please review test failures before merging.**' : '✨ **All tests passed! Safe to merge.**'}
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      # ═══════════════════════════════════════════════════════════════════
+      # STEP 20: Set Final Job Status
+      # ═══════════════════════════════════════════════════════════════════
+      - name: 🎯 Set Job Status
+        if: always()
+        run: |
+          if [ "${{ steps.run_tests.outcome }}" = "success" ]; then
+            echo "✅ Tests passed successfully"
+            exit 0
+          else
+            echo "❌ Tests failed"
+            exit 1
+          fi
